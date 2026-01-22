@@ -152,6 +152,7 @@ if uploaded_file is not None:
     original_image = Image.open(uploaded_file)
     
     # Resize logic: If width > 1024px, shrink it to save RAM
+    # This prevents the "Blank Page" crash
     if original_image.width > 1024:
         new_height = int((1024 / original_image.width) * original_image.height)
         original_image = original_image.resize((1024, new_height))
@@ -162,7 +163,7 @@ if uploaded_file is not None:
     
     # 2. ANALYSIS STEP (AI Logic)
     with st.spinner('Analyzing Coral Health...'):
-        # CRITICAL FIX: Feed the AI the ORIGINAL image. 
+        # ACCURACY FIX: Feed the AI the ORIGINAL image. 
         # The AI is trained on raw underwater photos. Enhancing them confuses it.
         mask = run_image_analysis(original_image)
         
