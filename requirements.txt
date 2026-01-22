@@ -5,5 +5,3 @@ numpy<2
 scipy
 Pillow
 fpdf
-matplotlib
-scikit-learn
