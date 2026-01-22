@@ -25,7 +25,7 @@ def load_model():
 
 processor, model = load_model()
 
-# --- IMAGE ENHANCER (Your Code Adapted for Streamlit) ---
+# --- IMAGE ENHANCER ---
 def enhance_coral_image(pil_image):
     # Convert PIL Image to OpenCV format (numpy array)
     img = np.array(pil_image)
@@ -69,16 +69,16 @@ def run_image_analysis(image):
 def check_if_coral_present(mask):
     """
     Checks if the AI actually found coral in the image.
-    Returns True if > 1% of the image is classified as coral.
+    Returns True if > 2% of the image is classified as coral.
     """
     total_pixels = mask.size
-    # These are the IDs for Healthy, Bleached, and Dead coral in this specific model
+    # IDs for Healthy (0-11, 23, 33), Bleached (12), Dead (17-18), Algae (13-16)
     coral_classes = [0,1,2,3,4,5,6,7,8,9,10,11,12,23,33,13,14,15,16,17,18]
     coral_pixels = np.isin(mask, coral_classes).sum()
     
     coverage_pct = (coral_pixels / total_pixels) * 100
     
-    # THRESHOLD: If less than 2% of the image is coral, we assume it's just water/sand
+    # THRESHOLD: If less than 2% is coral, assume it's empty water/sand
     if coverage_pct < 2.0:
         return False, coverage_pct
     return True, coverage_pct
@@ -96,6 +96,7 @@ def get_prediction_image(mask):
     return Image.fromarray(colors)
 
 def generate_reef_report(mask, filename):
+    # Safety Cast: Convert numpy numbers to standard Python int/float
     total_px = int(mask.size)
     healthy_px = int(np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33]).sum())
     bleached_px = int((mask == 12).sum())
@@ -147,7 +148,13 @@ st.markdown("### AI-Powered Analysis for Marine Conservation")
 uploaded_file = st.file_uploader("Choose a Coral Image...", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
+    # --- MEMORY FIX: Resize huge images immediately ---
     original_image = Image.open(uploaded_file)
+    
+    # Resize logic: If width > 1024px, shrink it to save RAM
+    if original_image.width > 1024:
+        new_height = int((1024 / original_image.width) * original_image.height)
+        original_image = original_image.resize((1024, new_height))
 
     # 1. ENHANCEMENT STEP
     with st.spinner('Enhancing Image Quality...'):
@@ -164,15 +171,15 @@ if uploaded_file is not None:
             st.error(f"⚠️ **Analysis Stopped:** No significant coral reef structures detected.")
             st.warning(f"The model found only {confidence:.2f}% coral coverage. Please upload a clearer underwater image containing visible coral.")
             
-            # Show the images anyway so user can see why
+            # Show images so user understands why
             img_col1, img_col2 = st.columns(2)
             with img_col1:
-                st.image(original_image, caption="Uploaded Image", use_container_width=True)
+                st.image(original_image, caption="Uploaded Image", width=300)
             with img_col2:
-                st.image(enhanced_image, caption="Enhanced Image (No Coral Found)", use_container_width=True)
+                st.image(enhanced_image, caption="Enhanced Image (No Coral Found)", width=300)
                 
         else:
-            # PROCEED WITH REPORT IF CORAL IS FOUND
+            # PROCEED WITH REPORT
             report = generate_reef_report(mask, uploaded_file.name)
             prediction_img = get_prediction_image(mask)
 
@@ -185,7 +192,7 @@ if uploaded_file is not None:
             st.subheader("Visual Analysis")
             img_col1, img_col2, img_col3 = st.columns(3)
             with img_col1:
-                st.image(original_image, caption="Original Image", use_container_width=True)
+                st.image(original_image, caption="Original", use_container_width=True)
             with img_col2:
                 st.image(enhanced_image, caption="Enhanced (Color Corrected)", use_container_width=True)
             with img_col3:
@@ -194,6 +201,7 @@ if uploaded_file is not None:
             st.caption("🟢 Green: Healthy | ⚪ White: Bleached | 🔴 Red: Algae | ⚫ Grey: Rubble")
 
             st.subheader("Detailed Report")
+            # Convert to strings to prevent Table Crash
             safe_report = {k: str(v) for k, v in report.items()}
             st.table([safe_report])
             
