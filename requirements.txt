@@ -2,6 +2,5 @@ streamlit
 transformers
 torch
 numpy<2
-scipy
 Pillow
 fpdf
