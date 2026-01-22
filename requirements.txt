@@ -7,5 +7,3 @@ Pillow
 fpdf
 matplotlib
 scikit-learn
-opencv-python-headless
-plotly
