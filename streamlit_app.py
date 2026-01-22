@@ -18,6 +18,7 @@ st.set_page_config(
 # --- 2. BACKEND LOGIC ---
 @st.cache_resource
 def load_model():
+    # Downloads model automatically from Hugging Face
     MODEL_NAME = "EPFL-ECEO/segformer-b2-finetuned-coralscapes-1024-1024"
     processor = SegformerImageProcessor.from_pretrained(MODEL_NAME)
     model = SegformerForSemanticSegmentation.from_pretrained(MODEL_NAME)
@@ -25,34 +26,33 @@ def load_model():
 
 processor, model = load_model()
 
-# --- IMAGE ENHANCER ---
+# --- IMPROVED IMAGE ENHANCER (Gentle Version) ---
 def enhance_coral_image(pil_image):
-    # Convert PIL Image to OpenCV format (numpy array)
+    # Convert PIL Image to OpenCV format
     img = np.array(pil_image)
-    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR) # Convert RGB to BGR
+    img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
-    # 1. Color correction (reduce blue tint)
-    img_lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(img_lab)
+    # 1. Gentle Auto-White Balance (Gray World Assumption)
+    result = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    avg_a = np.average(result[:, :, 1])
+    avg_b = np.average(result[:, :, 2])
+    result[:, :, 1] = result[:, :, 1] - ((avg_a - 128) * (result[:, :, 0] / 255.0) * 1.1)
+    result[:, :, 2] = result[:, :, 2] - ((avg_b - 128) * (result[:, :, 0] / 255.0) * 1.1)
+    result = cv2.cvtColor(result, cv2.COLOR_LAB2BGR)
 
-    # Apply CLAHE to L channel for better contrast
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+    # 2. Very Subtle Contrast Boost (CLAHE)
+    lab = cv2.cvtColor(result, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=1.1, tileGridSize=(8,8))
     l = clahe.apply(l)
+    lab = cv2.merge((l,a,b))
+    result = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
 
-    # Reduce blue channel (b channel in LAB)
-    b = cv2.addWeighted(b, 0.7, np.ones_like(b)*128, 0.3, 0)
+    # 3. Denoising
+    result = cv2.fastNlMeansDenoisingColored(result, None, 3, 3, 7, 21)
 
-    # Merge back
-    enhanced_lab = cv2.merge([l, a, b])
-    enhanced_bgr = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
-
-    # 2. Sharpen slightly
-    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-    enhanced_bgr = cv2.filter2D(enhanced_bgr, -1, kernel)
-
-    # Convert back to PIL Image (RGB) for Streamlit
-    enhanced_rgb = cv2.cvtColor(enhanced_bgr, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(enhanced_rgb)
+    # Convert back to PIL
+    return Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
 
 def run_image_analysis(image):
     image = image.convert("RGB")
@@ -156,13 +156,15 @@ if uploaded_file is not None:
         new_height = int((1024 / original_image.width) * original_image.height)
         original_image = original_image.resize((1024, new_height))
 
-    # 1. ENHANCEMENT STEP
+    # 1. ENHANCEMENT STEP (Visuals Only)
     with st.spinner('Enhancing Image Quality...'):
         enhanced_image = enhance_coral_image(original_image)
     
-    # 2. ANALYSIS STEP
+    # 2. ANALYSIS STEP (AI Logic)
     with st.spinner('Analyzing Coral Health...'):
-        mask = run_image_analysis(enhanced_image)
+        # CRITICAL FIX: Feed the AI the ORIGINAL image. 
+        # The AI is trained on raw underwater photos. Enhancing them confuses it.
+        mask = run_image_analysis(original_image)
         
         # 3. DETECTION CHECK (Is it a coral?)
         is_coral, confidence = check_if_coral_present(mask)
