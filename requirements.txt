@@ -1,0 +1,9 @@
+streamlit
+transformers
+torch
+numpy
+scipy
+Pillow
+fpdf
+matplotlib
+scikit-learn
