@@ -2,10 +2,9 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter # Using native PIL for filtering
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 from fpdf import FPDF
-from scipy.ndimage import median_filter
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(
@@ -27,40 +26,35 @@ def load_model():
 processor, model = load_model()
 
 def run_image_analysis(image):
-    # 1. Resize to Model Native Size (1024x1024)
-    # This prevents RAM crashes and ensures the model sees exactly what it was trained on.
+    # CRITICAL: Resize to 1024x1024 immediately to save RAM.
+    # LANCZOS is the highest quality resize method.
     input_image = image.resize((1024, 1024), Image.Resampling.LANCZOS)
     
     inputs = processor(images=input_image, return_tensors="pt")
 
     with torch.no_grad():
         outputs = model(**inputs)
-        # Upsample logits to match 1024x1024
         upsampled_logits = nn.functional.interpolate(
             outputs.logits, size=(1024, 1024), mode='bilinear'
         )
-        # Get the prediction mask
         mask = upsampled_logits.argmax(dim=1).squeeze().numpy()
         
     return mask
 
-def clean_mask_noise(mask):
-    """
-    ACCURACY BOOSTER: Removes salt-and-pepper noise (random dots).
-    """
-    return median_filter(mask, size=5)
-
 def get_prediction_image(mask):
+    # Convert mask to colored image
     colors = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
-    # Healthy (Green)
-    colors[np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33])] = [34, 139, 34]
-    # Bleached (White)
-    colors[mask == 12] = [255, 255, 255]
-    # Algae (Red)
-    colors[np.isin(mask, [13,14,15,16])] = [220, 20, 60]
-    # Rubble (Grey)
-    colors[np.isin(mask, [17,18])] = [128, 128, 128]
-    return Image.fromarray(colors)
+    colors[np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33])] = [34, 139, 34] # Green
+    colors[mask == 12] = [255, 255, 255] # White
+    colors[np.isin(mask, [13,14,15,16])] = [220, 20, 60] # Red
+    colors[np.isin(mask, [17,18])] = [128, 128, 128] # Grey
+    
+    img = Image.fromarray(colors)
+    
+    # LIGHTWEIGHT DENOISING: Use PIL's built-in MedianFilter
+    # This removes the need for the heavy 'scipy' library
+    img = img.filter(ImageFilter.MedianFilter(size=5))
+    return img
 
 def generate_reef_report(mask, filename):
     total_px = int(mask.size)
@@ -94,12 +88,10 @@ def create_pdf(report):
     pdf.cell(200, 10, txt=f"File: {report['Image_ID']}", ln=True)
     pdf.ln(5)
     
-    # Status
     status_color = "RED" if report['Health_Status'] == "Bleached" else "GREEN"
     pdf.set_font("Arial", 'B', 14)
     pdf.cell(200, 10, txt=f"Status: {report['Health_Status']}", ln=True)
     
-    # Metrics
     pdf.set_font("Arial", size=12)
     pdf.ln(5)
     pdf.cell(200, 10, txt=f"Bleaching Severity: {report['Bleaching_Severity']}%", ln=True)
@@ -115,22 +107,20 @@ st.markdown("### Automated Health Analysis System")
 uploaded_file = st.file_uploader("Upload Image (JPG/PNG)", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    # 1. Open & Resize (CRITICAL FOR MEMORY SAFETY)
+    # 1. Open & Resize Immediately
     original_image = Image.open(uploaded_file)
     if original_image.width > 1024:
         original_image.thumbnail((1024, 1024))
 
-    with st.spinner('Analyzing bio-indicators...'):
+    with st.spinner('Analyzing...'):
         # 2. Run AI Analysis
         raw_mask = run_image_analysis(original_image)
-        clean_mask = clean_mask_noise(raw_mask)
         
         # 3. Generate Outputs
-        report = generate_reef_report(clean_mask, uploaded_file.name)
-        prediction_img = get_prediction_image(clean_mask)
+        report = generate_reef_report(raw_mask, uploaded_file.name)
+        prediction_img = get_prediction_image(raw_mask)
 
     # --- UI DISPLAY ---
-    # Top Metrics Bar
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Status", report["Health_Status"])
     col2.metric("Bleaching", f"{report['Bleaching_Severity']}%")
@@ -139,7 +129,6 @@ if uploaded_file is not None:
 
     st.divider()
 
-    # Visual Comparison
     col_img1, col_img2 = st.columns(2)
     with col_img1:
         st.image(original_image, caption="Original Input", use_container_width=True)
@@ -150,15 +139,11 @@ if uploaded_file is not None:
     
     st.divider()
 
-    # Data & Export
-    col_table, col_btn = st.columns([3, 1])
-    with col_table:
-        st.dataframe([report], hide_index=True, use_container_width=True)
+    col_btn = st.columns(1)[0]
     with col_btn:
-        st.write("") # Spacer
         pdf_bytes = create_pdf(report)
         st.download_button(
-            label="📄 Download Report",
+            label="📄 Download PDF Report",
             data=pdf_bytes,
             file_name=f"reef_report.pdf",
             mime="application/pdf",
