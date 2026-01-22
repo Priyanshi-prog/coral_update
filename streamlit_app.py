@@ -7,7 +7,7 @@ from transformers import SegformerImageProcessor, SegformerForSemanticSegmentati
 from fpdf import FPDF
 import io
 
-# --- 1. CONFIGURATION ---
+# --- 1. CONFIGURATION & STYLING ---
 st.set_page_config(
     page_title="ReefGuard AI",
     page_icon="🪸",
@@ -15,22 +15,63 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for better UI
+# Custom CSS for "Sea Glass" Design
 st.markdown("""
     <style>
-    .metric-card {
-        background-color: #f0f2f6;
-        padding: 15px;
-        border-radius: 10px;
-        border-left: 5px solid #ff4b4b;
+    /* Main Background - Subtle Ocean Gradient */
+    .stApp {
+        background: linear-gradient(to bottom right, #e0f7fa, #ffffff);
+    }
+    
+    /* Card Styling */
+    div[data-testid="metric-container"] {
+        background-color: rgba(255, 255, 255, 0.8);
+        border: 1px solid #b2ebf2;
+        padding: 20px;
+        border-radius: 15px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        transition: transform 0.2s;
+    }
+    div[data-testid="metric-container"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 8px rgba(0,0,0,0.1);
+    }
+    
+    /* Header Styling */
+    h1 {
+        color: #006064;
+        font-family: 'Helvetica Neue', sans-serif;
+    }
+    h3 {
+        color: #00838f;
+    }
+    
+    /* Sidebar Styling */
+    section[data-testid="stSidebar"] {
+        background-color: #f0fcfc;
+        border-right: 1px solid #b2ebf2;
+    }
+    
+    /* Button Styling */
+    div.stButton > button {
+        background: linear-gradient(45deg, #00acc1, #00838f);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 24px;
+        font-weight: bold;
+    }
+    div.stButton > button:hover {
+        background: linear-gradient(45deg, #00bcd4, #0097a7);
+        border: none;
+        box-shadow: 0 4px 12px rgba(0,172,193,0.3);
     }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. BACKEND LOGIC ---
+# --- 2. BACKEND LOGIC (Lightweight & Stable) ---
 @st.cache_resource
 def load_model():
-    # Downloads model automatically from Hugging Face
     MODEL_NAME = "EPFL-ECEO/segformer-b2-finetuned-coralscapes-1024-1024"
     processor = SegformerImageProcessor.from_pretrained(MODEL_NAME)
     model = SegformerForSemanticSegmentation.from_pretrained(MODEL_NAME)
@@ -39,11 +80,8 @@ def load_model():
 processor, model = load_model()
 
 def run_image_analysis(image):
-    # ACCURACY OPTIMIZATION: 
-    # The model was trained on 1024x1024 images.
-    # We strictly resize to this resolution to maximize accuracy and prevent RAM crashes.
+    # Resize to 1024x1024 to prevent RAM crash
     input_image = image.resize((1024, 1024), Image.Resampling.LANCZOS)
-    
     inputs = processor(images=input_image, return_tensors="pt")
 
     with torch.no_grad():
@@ -56,21 +94,20 @@ def run_image_analysis(image):
     return mask
 
 def clean_mask(mask):
-    # ACCURACY BOOSTER: Removes random noise dots (salt-and-pepper noise)
-    # Uses PIL's MedianFilter which is faster and lighter than Scipy
+    # PIL Median Filter (Lightweight Despeckling)
     mask_img = Image.fromarray(mask.astype('uint8'))
     clean_img = mask_img.filter(ImageFilter.MedianFilter(size=5))
     return np.array(clean_img)
 
 def get_prediction_image(mask):
     colors = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
-    # Healthy (Green)
-    colors[np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33])] = [46, 204, 113]
+    # Healthy (Teal/Green)
+    colors[np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33])] = [26, 188, 156]
     # Bleached (White)
     colors[mask == 12] = [236, 240, 241]
-    # Algae (Red)
+    # Algae (Coral Red)
     colors[np.isin(mask, [13,14,15,16])] = [231, 76, 60]
-    # Rubble (Grey)
+    # Rubble (Slate Grey)
     colors[np.isin(mask, [17,18])] = [149, 165, 166]
     return Image.fromarray(colors)
 
@@ -102,81 +139,85 @@ def generate_report(mask, filename):
 def create_pdf(report):
     pdf = FPDF()
     pdf.add_page()
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, "Coral Health Assessment", ln=True, align='C')
+    pdf.set_font("Arial", 'B', 20)
+    pdf.cell(0, 15, "ReefGuard AI Analysis", ln=True, align='C')
+    pdf.set_font("Arial", 'I', 12)
+    pdf.cell(0, 10, "Automated Ecological Assessment", ln=True, align='C')
     pdf.ln(10)
+    
+    # Metrics Box
+    pdf.set_fill_color(240, 252, 252) # Light Cyan
+    pdf.rect(10, 40, 190, 60, 'F')
+    
+    pdf.set_font("Arial", 'B', 14)
+    pdf.set_xy(20, 50)
+    pdf.cell(0, 10, f"File: {report['File']}", ln=True)
+    pdf.set_xy(20, 60)
+    pdf.cell(0, 10, f"Overall Status: {report['Status']}", ln=True)
     
     pdf.set_font("Arial", size=12)
-    pdf.cell(0, 10, f"Analysis for: {report['File']}", ln=True)
-    pdf.ln(5)
-    
-    # Status Box
-    pdf.set_fill_color(240, 240, 240)
-    pdf.cell(0, 15, f"Overall Status: {report['Status']}", ln=True, fill=True)
-    pdf.ln(10)
-    
-    # Metrics
+    pdf.set_xy(20, 75)
     pdf.cell(0, 10, f"Bleaching Severity: {report['Bleaching']}%", ln=True)
+    pdf.set_xy(20, 85)
     pdf.cell(0, 10, f"Live Coral Cover: {report['Live_Cover']}%", ln=True)
+    pdf.set_xy(20, 95)
     pdf.cell(0, 10, f"Algae Coverage: {report['Algae']}%", ln=True)
     
-    pdf.ln(20)
+    pdf.set_y(110)
     pdf.set_font("Arial", 'I', 10)
-    pdf.cell(0, 10, "Generated by ReefGuard AI", align='C')
+    pdf.cell(0, 10, "Report generated by ReefGuard AI System", align='C')
     return pdf.output(dest='S').encode('latin-1')
 
 # --- 3. FRONTEND UI ---
-st.sidebar.title("🪸 ReefGuard AI")
-st.sidebar.info("Upload an underwater image to analyze coral health automatically.")
+st.title("🪸 ReefGuard AI")
+st.markdown("### Intelligent Coral Health Monitoring System")
 
-uploaded_file = st.sidebar.file_uploader("Upload Image", type=["jpg", "jpeg", "png"])
+# Sidebar
+st.sidebar.title("Configuration")
+uploaded_file = st.sidebar.file_uploader("Upload Underwater Image", type=["jpg", "jpeg", "png"])
+st.sidebar.markdown("---")
+st.sidebar.info("This system uses the EPFL SegFormer model to detect bleaching events with pixel-level precision.")
 
 if uploaded_file is not None:
-    # 1. Processing
+    # Processing
     image = Image.open(uploaded_file)
-    
-    # Memory Safety: Resize strictly to 1024px
     if image.width > 1024:
         image.thumbnail((1024, 1024))
         
-    st.sidebar.success("Image Uploaded Successfully!")
-    
-    with st.spinner('Running AI Segmentation...'):
+    with st.spinner('Processing reef data...'):
         raw_mask = run_image_analysis(image)
-        clean_mask = clean_mask(raw_mask) # Denoising step
+        clean_mask = clean_mask(raw_mask)
         report = generate_report(clean_mask, uploaded_file.name)
         prediction = get_prediction_image(clean_mask)
 
-    # 2. Dashboard Header
-    st.header(f"Analysis Result: {report['Status']}")
-    
-    # 3. Metrics Row
+    # Metrics Dashboard
+    st.markdown("#### Real-time Telemetry")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Health Status", report["Status"])
     m2.metric("Bleaching", f"{report['Bleaching']}%")
     m3.metric("Live Cover", f"{report['Live_Cover']}%")
     m4.metric("Algae", f"{report['Algae']}%")
     
-    st.divider()
+    st.markdown("---")
 
-    # 4. Visual Analysis
+    # Visuals
     c1, c2 = st.columns(2)
     with c1:
-        st.subheader("Original View")
-        st.image(image, use_container_width=True)
+        st.markdown("##### 📷 Original Feed")
+        st.image(image, use_container_width=True, caption="Input Image")
     with c2:
-        st.subheader("AI Diagnostics")
-        st.image(prediction, use_container_width=True)
+        st.markdown("##### 🧠 AI Diagnostics")
+        st.image(prediction, use_container_width=True, caption="Segmentation Mask")
         
-    st.caption("Legend: 🟢 Healthy Coral | ⚪ Bleached Coral | 🔴 Algae | ⚫ Rubble")
+    st.info("Legend: 🟢 Healthy (Green) | ⚪ Bleached (White) | 🔴 Algae (Red) | ⚫ Rubble (Grey)")
 
-    # 5. Export
-    st.divider()
-    col_dl, _ = st.columns([1, 2])
+    # Export
+    st.markdown("---")
+    col_dl, col_space = st.columns([1, 2])
     with col_dl:
         pdf_data = create_pdf(report)
         st.download_button(
-            label="📄 Download Official Report (PDF)",
+            label="📄 Export Scientific Report (PDF)",
             data=pdf_data,
             file_name=f"ReefGuard_Report.pdf",
             mime="application/pdf",
@@ -185,13 +226,15 @@ if uploaded_file is not None:
         )
 
 else:
-    # Empty State (Welcome Screen)
-    st.title("Welcome to ReefGuard AI")
+    # Welcome Screen
     st.markdown("""
-    This tool uses **Computer Vision** to detect coral bleaching.
-    
-    **How to use:**
-    1. Open the sidebar (arrow on top-left).
-    2. Upload a clear underwater photo.
-    3. Get instant health metrics and a PDF report.
-    """)
+    <div style='background-color: #f0fcfc; padding: 20px; border-radius: 10px; border: 1px solid #b2ebf2;'>
+        <h4>Welcome to ReefGuard</h4>
+        <p>Upload a coral reef image to begin analysis. The system will detect:</p>
+        <ul>
+            <li>Live Coral Coverage</li>
+            <li>Bleaching Severity</li>
+            <li>Algae Proliferation</li>
+        </ul>
+    </div>
+    """, unsafe_allow_html=True)
