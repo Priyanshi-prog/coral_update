@@ -1,9 +1,6 @@
 streamlit
 transformers
 torch
-numpy
-scipy
+numpy<2
 Pillow
 fpdf
-matplotlib
-scikit-learn
