@@ -2,17 +2,30 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import numpy as np
-from PIL import Image, ImageFilter # Using native PIL for filtering
+from PIL import Image, ImageFilter
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 from fpdf import FPDF
+import io
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(
-    page_title="Coral Reef AI",
+    page_title="ReefGuard AI",
     page_icon="🪸",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
+
+# Custom CSS for better UI
+st.markdown("""
+    <style>
+    .metric-card {
+        background-color: #f0f2f6;
+        padding: 15px;
+        border-radius: 10px;
+        border-left: 5px solid #ff4b4b;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 # --- 2. BACKEND LOGIC ---
 @st.cache_resource
@@ -26,8 +39,9 @@ def load_model():
 processor, model = load_model()
 
 def run_image_analysis(image):
-    # CRITICAL: Resize to 1024x1024 immediately to save RAM.
-    # LANCZOS is the highest quality resize method.
+    # ACCURACY OPTIMIZATION: 
+    # The model was trained on 1024x1024 images.
+    # We strictly resize to this resolution to maximize accuracy and prevent RAM crashes.
     input_image = image.resize((1024, 1024), Image.Resampling.LANCZOS)
     
     inputs = processor(images=input_image, return_tensors="pt")
@@ -41,22 +55,26 @@ def run_image_analysis(image):
         
     return mask
 
-def get_prediction_image(mask):
-    # Convert mask to colored image
-    colors = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
-    colors[np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33])] = [34, 139, 34] # Green
-    colors[mask == 12] = [255, 255, 255] # White
-    colors[np.isin(mask, [13,14,15,16])] = [220, 20, 60] # Red
-    colors[np.isin(mask, [17,18])] = [128, 128, 128] # Grey
-    
-    img = Image.fromarray(colors)
-    
-    # LIGHTWEIGHT DENOISING: Use PIL's built-in MedianFilter
-    # This removes the need for the heavy 'scipy' library
-    img = img.filter(ImageFilter.MedianFilter(size=5))
-    return img
+def clean_mask(mask):
+    # ACCURACY BOOSTER: Removes random noise dots (salt-and-pepper noise)
+    # Uses PIL's MedianFilter which is faster and lighter than Scipy
+    mask_img = Image.fromarray(mask.astype('uint8'))
+    clean_img = mask_img.filter(ImageFilter.MedianFilter(size=5))
+    return np.array(clean_img)
 
-def generate_reef_report(mask, filename):
+def get_prediction_image(mask):
+    colors = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
+    # Healthy (Green)
+    colors[np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33])] = [46, 204, 113]
+    # Bleached (White)
+    colors[mask == 12] = [236, 240, 241]
+    # Algae (Red)
+    colors[np.isin(mask, [13,14,15,16])] = [231, 76, 60]
+    # Rubble (Grey)
+    colors[np.isin(mask, [17,18])] = [149, 165, 166]
+    return Image.fromarray(colors)
+
+def generate_report(mask, filename):
     total_px = int(mask.size)
     if total_px == 0: total_px = 1
     
@@ -65,88 +83,115 @@ def generate_reef_report(mask, filename):
     algae_px = int(np.isin(mask, [13,14,15,16]).sum())
     
     total_coral = healthy_px + bleached_px
-    
     lcc_val = (total_coral / total_px) * 100
     sev_val = (bleached_px / total_coral * 100) if total_coral > 0 else 0
     algae_cov = (algae_px / total_px) * 100
     
+    status = "Healthy"
+    if sev_val > 10: status = "Bleached"
+    if sev_val > 50: status = "Critical"
+    
     return {
-        "Image_ID": str(filename),
-        "Health_Status": "Bleached" if sev_val > 10 else "Healthy",
-        "Bleaching_Severity": round(float(sev_val), 2),
-        "Live_Coral_Cover": round(float(lcc_val), 1),
-        "Algae_Cover": round(float(algae_cov), 1),
+        "File": str(filename),
+        "Status": status,
+        "Bleaching": round(float(sev_val), 2),
+        "Live_Cover": round(float(lcc_val), 1),
+        "Algae": round(float(algae_cov), 1),
     }
 
 def create_pdf(report):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, txt="Coral Reef Health Report", ln=True, align='C')
+    pdf.cell(0, 10, "Coral Health Assessment", ln=True, align='C')
     pdf.ln(10)
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt=f"File: {report['Image_ID']}", ln=True)
-    pdf.ln(5)
-    
-    status_color = "RED" if report['Health_Status'] == "Bleached" else "GREEN"
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(200, 10, txt=f"Status: {report['Health_Status']}", ln=True)
     
     pdf.set_font("Arial", size=12)
+    pdf.cell(0, 10, f"Analysis for: {report['File']}", ln=True)
     pdf.ln(5)
-    pdf.cell(200, 10, txt=f"Bleaching Severity: {report['Bleaching_Severity']}%", ln=True)
-    pdf.cell(200, 10, txt=f"Live Coral Cover: {report['Live_Coral_Cover']}%", ln=True)
-    pdf.cell(200, 10, txt=f"Algae Cover: {report['Algae_Cover']}%", ln=True)
     
+    # Status Box
+    pdf.set_fill_color(240, 240, 240)
+    pdf.cell(0, 15, f"Overall Status: {report['Status']}", ln=True, fill=True)
+    pdf.ln(10)
+    
+    # Metrics
+    pdf.cell(0, 10, f"Bleaching Severity: {report['Bleaching']}%", ln=True)
+    pdf.cell(0, 10, f"Live Coral Cover: {report['Live_Cover']}%", ln=True)
+    pdf.cell(0, 10, f"Algae Coverage: {report['Algae']}%", ln=True)
+    
+    pdf.ln(20)
+    pdf.set_font("Arial", 'I', 10)
+    pdf.cell(0, 10, "Generated by ReefGuard AI", align='C')
     return pdf.output(dest='S').encode('latin-1')
 
 # --- 3. FRONTEND UI ---
-st.title("🪸 Coral Reef AI Inspector")
-st.markdown("### Automated Health Analysis System")
+st.sidebar.title("🪸 ReefGuard AI")
+st.sidebar.info("Upload an underwater image to analyze coral health automatically.")
 
-uploaded_file = st.file_uploader("Upload Image (JPG/PNG)", type=["jpg", "jpeg", "png"])
+uploaded_file = st.sidebar.file_uploader("Upload Image", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    # 1. Open & Resize Immediately
-    original_image = Image.open(uploaded_file)
-    if original_image.width > 1024:
-        original_image.thumbnail((1024, 1024))
-
-    with st.spinner('Analyzing...'):
-        # 2. Run AI Analysis
-        raw_mask = run_image_analysis(original_image)
+    # 1. Processing
+    image = Image.open(uploaded_file)
+    
+    # Memory Safety: Resize strictly to 1024px
+    if image.width > 1024:
+        image.thumbnail((1024, 1024))
         
-        # 3. Generate Outputs
-        report = generate_reef_report(raw_mask, uploaded_file.name)
-        prediction_img = get_prediction_image(raw_mask)
-
-    # --- UI DISPLAY ---
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Status", report["Health_Status"])
-    col2.metric("Bleaching", f"{report['Bleaching_Severity']}%")
-    col3.metric("Live Cover", f"{report['Live_Coral_Cover']}%")
-    col4.metric("Algae", f"{report['Algae_Cover']}%")
-
-    st.divider()
-
-    col_img1, col_img2 = st.columns(2)
-    with col_img1:
-        st.image(original_image, caption="Original Input", use_container_width=True)
-    with col_img2:
-        st.image(prediction_img, caption="AI Segmentation Mask", use_container_width=True)
+    st.sidebar.success("Image Uploaded Successfully!")
     
-    st.caption("Legend: 🟢 Healthy | ⚪ Bleached | 🔴 Algae | ⚫ Rubble")
+    with st.spinner('Running AI Segmentation...'):
+        raw_mask = run_image_analysis(image)
+        clean_mask = clean_mask(raw_mask) # Denoising step
+        report = generate_report(clean_mask, uploaded_file.name)
+        prediction = get_prediction_image(clean_mask)
+
+    # 2. Dashboard Header
+    st.header(f"Analysis Result: {report['Status']}")
+    
+    # 3. Metrics Row
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Health Status", report["Status"])
+    m2.metric("Bleaching", f"{report['Bleaching']}%")
+    m3.metric("Live Cover", f"{report['Live_Cover']}%")
+    m4.metric("Algae", f"{report['Algae']}%")
     
     st.divider()
 
-    col_btn = st.columns(1)[0]
-    with col_btn:
-        pdf_bytes = create_pdf(report)
+    # 4. Visual Analysis
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Original View")
+        st.image(image, use_container_width=True)
+    with c2:
+        st.subheader("AI Diagnostics")
+        st.image(prediction, use_container_width=True)
+        
+    st.caption("Legend: 🟢 Healthy Coral | ⚪ Bleached Coral | 🔴 Algae | ⚫ Rubble")
+
+    # 5. Export
+    st.divider()
+    col_dl, _ = st.columns([1, 2])
+    with col_dl:
+        pdf_data = create_pdf(report)
         st.download_button(
-            label="📄 Download PDF Report",
-            data=pdf_bytes,
-            file_name=f"reef_report.pdf",
+            label="📄 Download Official Report (PDF)",
+            data=pdf_data,
+            file_name=f"ReefGuard_Report.pdf",
             mime="application/pdf",
             type="primary",
             use_container_width=True
         )
+
+else:
+    # Empty State (Welcome Screen)
+    st.title("Welcome to ReefGuard AI")
+    st.markdown("""
+    This tool uses **Computer Vision** to detect coral bleaching.
+    
+    **How to use:**
+    1. Open the sidebar (arrow on top-left).
+    2. Upload a clear underwater photo.
+    3. Get instant health metrics and a PDF report.
+    """)
