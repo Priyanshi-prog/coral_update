@@ -5,13 +5,14 @@ import numpy as np
 from PIL import Image
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 from fpdf import FPDF
-from scipy.ndimage import median_filter # NEW: For cleaning up the mask
+from scipy.ndimage import median_filter
 
 # --- 1. CONFIGURATION ---
 st.set_page_config(
-    page_title="Coral Reef AI Inspector",
+    page_title="Coral Reef AI",
     page_icon="🪸",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
 # --- 2. BACKEND LOGIC ---
@@ -27,20 +28,17 @@ processor, model = load_model()
 
 def run_image_analysis(image):
     # 1. Resize to Model Native Size (1024x1024)
-    # This ensures the model sees exactly what it was trained on.
-    # We use LANCZOS for high-quality downsampling to preserve texture.
+    # This prevents RAM crashes and ensures the model sees exactly what it was trained on.
     input_image = image.resize((1024, 1024), Image.Resampling.LANCZOS)
     
     inputs = processor(images=input_image, return_tensors="pt")
 
     with torch.no_grad():
         outputs = model(**inputs)
-        
         # Upsample logits to match 1024x1024
         upsampled_logits = nn.functional.interpolate(
             outputs.logits, size=(1024, 1024), mode='bilinear'
         )
-        
         # Get the prediction mask
         mask = upsampled_logits.argmax(dim=1).squeeze().numpy()
         
@@ -48,129 +46,122 @@ def run_image_analysis(image):
 
 def clean_mask_noise(mask):
     """
-    ACCURACY BOOSTER:
-    Applies a 'Median Filter' to remove salt-and-pepper noise.
-    This eliminates random single pixels of 'Algae' or 'Bleaching' 
-    that shouldn't be there, making the result look much more professional.
+    ACCURACY BOOSTER: Removes salt-and-pepper noise (random dots).
     """
-    # Size 5 filter looks at 5x5 pixel blocks to smooth edges
-    cleaned_mask = median_filter(mask, size=5)
-    return cleaned_mask
+    return median_filter(mask, size=5)
 
 def get_prediction_image(mask):
     colors = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
-    # Healthy (Green) - Classes: Hard Coral, Soft Coral, etc.
+    # Healthy (Green)
     colors[np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33])] = [34, 139, 34]
-    # Bleached (White) - Class 12
+    # Bleached (White)
     colors[mask == 12] = [255, 255, 255]
-    # Algae (Red) - Classes: Macroalgae, Turf Algae
-    colors[np.isin(mask, [13,14,15,16])] = [220, 20, 60] # Crimson Red
-    # Rubble/Rock (Grey) - Classes 17, 18
+    # Algae (Red)
+    colors[np.isin(mask, [13,14,15,16])] = [220, 20, 60]
+    # Rubble (Grey)
     colors[np.isin(mask, [17,18])] = [128, 128, 128]
     return Image.fromarray(colors)
 
 def generate_reef_report(mask, filename):
     total_px = int(mask.size)
+    if total_px == 0: total_px = 1
+    
     healthy_px = int(np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33]).sum())
     bleached_px = int((mask == 12).sum())
     algae_px = int(np.isin(mask, [13,14,15,16]).sum())
-    damage_px = int(np.isin(mask, [17,18]).sum())
     
     total_coral = healthy_px + bleached_px
     
-    # Avoid division by zero
-    if total_px == 0: total_px = 1
-    
     lcc_val = (total_coral / total_px) * 100
-    # Severity is (Bleached / Total Coral)
     sev_val = (bleached_px / total_coral * 100) if total_coral > 0 else 0
     algae_cov = (algae_px / total_px) * 100
     
     return {
         "Image_ID": str(filename),
         "Health_Status": "Bleached" if sev_val > 10 else "Healthy",
-        "Bleaching_Severity_Score": round(float(sev_val), 2),
-        "Severity_Label": "Severe" if sev_val > 50 else "Moderate" if sev_val > 15 else "Low",
-        "Live_Coral_Cover_Pct": round(float(lcc_val), 1),
-        "Algae_Cover_Pct": round(float(algae_cov), 1),
-        "Structural_Damage": "High" if damage_px > (total_px * 0.05) else "Low"
+        "Bleaching_Severity": round(float(sev_val), 2),
+        "Live_Coral_Cover": round(float(lcc_val), 1),
+        "Algae_Cover": round(float(algae_cov), 1),
     }
 
 def create_pdf(report):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, txt="Coral Reef Health Analysis Report", ln=True, align='C')
+    pdf.cell(200, 10, txt="Coral Reef Health Report", ln=True, align='C')
     pdf.ln(10)
     pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt=f"Image Filename: {report['Image_ID']}", ln=True)
+    pdf.cell(200, 10, txt=f"File: {report['Image_ID']}", ln=True)
     pdf.ln(5)
+    
+    # Status
+    status_color = "RED" if report['Health_Status'] == "Bleached" else "GREEN"
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(200, 10, txt=f"Overall Status: {report['Health_Status']}", ln=True)
+    pdf.cell(200, 10, txt=f"Status: {report['Health_Status']}", ln=True)
+    
+    # Metrics
     pdf.set_font("Arial", size=12)
     pdf.ln(5)
-    pdf.cell(200, 10, txt=f"Bleaching Severity: {report['Severity_Label']} ({report['Bleaching_Severity_Score']}%)", ln=True)
-    pdf.cell(200, 10, txt=f"Live Coral Cover: {report['Live_Coral_Cover_Pct']}%", ln=True)
-    pdf.cell(200, 10, txt=f"Algae Cover: {report['Algae_Cover_Pct']}%", ln=True)
-    pdf.ln(20)
-    pdf.set_font("Arial", 'I', 10)
-    pdf.cell(200, 10, txt="Generated by AI Coral Inspector", ln=True, align='C')
+    pdf.cell(200, 10, txt=f"Bleaching Severity: {report['Bleaching_Severity']}%", ln=True)
+    pdf.cell(200, 10, txt=f"Live Coral Cover: {report['Live_Coral_Cover']}%", ln=True)
+    pdf.cell(200, 10, txt=f"Algae Cover: {report['Algae_Cover']}%", ln=True)
+    
     return pdf.output(dest='S').encode('latin-1')
 
 # --- 3. FRONTEND UI ---
-st.title("🪸 Coral Reef Bleaching Detector")
-st.markdown("### AI-Powered Analysis for Marine Conservation")
+st.title("🪸 Coral Reef AI Inspector")
+st.markdown("### Automated Health Analysis System")
 
-uploaded_file = st.file_uploader("Choose a Coral Image...", type=["jpg", "jpeg", "png"])
+uploaded_file = st.file_uploader("Upload Image (JPG/PNG)", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    # --- MEMORY SAFETY START ---
-    # 1. Open the image
+    # 1. Open & Resize (CRITICAL FOR MEMORY SAFETY)
     original_image = Image.open(uploaded_file)
-    
-    # 2. Force resize high-res images to prevent RAM crash
-    # 1024px is the max size the AI uses anyway, so holding 4000px in RAM is wasteful.
-    if original_image.width > 1024 or original_image.height > 1024:
+    if original_image.width > 1024:
         original_image.thumbnail((1024, 1024))
-    # --- MEMORY SAFETY END ---
 
-    with st.spinner('Running High-Precision Analysis...'):
-        # 1. Run AI
+    with st.spinner('Analyzing bio-indicators...'):
+        # 2. Run AI Analysis
         raw_mask = run_image_analysis(original_image)
-        
-        # 2. Clean up Noise (Despeckling)
         clean_mask = clean_mask_noise(raw_mask)
         
-        # 3. Generate Report
+        # 3. Generate Outputs
         report = generate_reef_report(clean_mask, uploaded_file.name)
         prediction_img = get_prediction_image(clean_mask)
 
-    # --- DISPLAY RESULTS ---
-    # Simple, clean layout. No heavy charts to crash the app.
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Health Status", report["Health_Status"])
-    col2.metric("Bleaching Severity", f"{report['Bleaching_Severity_Score']}%", report["Severity_Label"])
-    col3.metric("Live Coral Cover", f"{report['Live_Coral_Cover_Pct']}%")
+    # --- UI DISPLAY ---
+    # Top Metrics Bar
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Status", report["Health_Status"])
+    col2.metric("Bleaching", f"{report['Bleaching_Severity']}%")
+    col3.metric("Live Cover", f"{report['Live_Coral_Cover']}%")
+    col4.metric("Algae", f"{report['Algae_Cover']}%")
 
-    st.subheader("Visual Analysis")
-    img_col1, img_col2 = st.columns(2)
-    with img_col1:
-        st.image(original_image, caption="Original Image", use_container_width=True)
-    with img_col2:
-        st.image(prediction_img, caption="AI Segmentation Mask (Denoised)", use_container_width=True)
+    st.divider()
+
+    # Visual Comparison
+    col_img1, col_img2 = st.columns(2)
+    with col_img1:
+        st.image(original_image, caption="Original Input", use_container_width=True)
+    with col_img2:
+        st.image(prediction_img, caption="AI Segmentation Mask", use_container_width=True)
     
-    st.caption("🟢 Green: Healthy | ⚪ White: Bleached | 🔴 Red: Algae | ⚫ Grey: Rubble")
-
-    st.subheader("Detailed Report")
-    safe_report = {k: str(v) for k, v in report.items()}
-    st.table([safe_report])
+    st.caption("Legend: 🟢 Healthy | ⚪ Bleached | 🔴 Algae | ⚫ Rubble")
     
-    pdf_bytes = create_pdf(report)
-    st.download_button(
-        label="📄 Download PDF Report",
-        data=pdf_bytes,
-        file_name=f"reef_report_{uploaded_file.name}.pdf",
-        mime="application/pdf"
-    )
+    st.divider()
 
-    st.success(f"Analysis complete for {uploaded_file.name}")
+    # Data & Export
+    col_table, col_btn = st.columns([3, 1])
+    with col_table:
+        st.dataframe([report], hide_index=True, use_container_width=True)
+    with col_btn:
+        st.write("") # Spacer
+        pdf_bytes = create_pdf(report)
+        st.download_button(
+            label="📄 Download Report",
+            data=pdf_bytes,
+            file_name=f"reef_report.pdf",
+            mime="application/pdf",
+            type="primary",
+            use_container_width=True
+        )
