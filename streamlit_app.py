@@ -2,23 +2,40 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 from fpdf import FPDF
-from scipy.ndimage import median_filter  # <--- NEW: For accuracy boosting
 import io
+import gc
 
-# --- 1. CONFIGURATION ---
+# --- 1. CONFIGURATION & UI ---
 st.set_page_config(
-    page_title="Coral Reef AI Inspector",
+    page_title="ReefGuard AI",
     page_icon="🪸",
     layout="wide"
 )
 
+# Professional "Glass" UI Styling
+st.markdown("""
+    <style>
+    .stApp {
+        background: linear-gradient(180deg, #e0f7fa 0%, #ffffff 100%);
+    }
+    div[data-testid="metric-container"] {
+        background-color: rgba(255, 255, 255, 0.9);
+        border: 1px solid #b2ebf2;
+        padding: 15px;
+        border-radius: 10px;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+    }
+    h1 { color: #006064; }
+    h3 { color: #00838f; }
+    </style>
+    """, unsafe_allow_html=True)
+
 # --- 2. BACKEND LOGIC ---
 @st.cache_resource
 def load_model():
-    # Downloads model automatically from Hugging Face
     MODEL_NAME = "EPFL-ECEO/segformer-b2-finetuned-coralscapes-1024-1024"
     processor = SegformerImageProcessor.from_pretrained(MODEL_NAME)
     model = SegformerForSemanticSegmentation.from_pretrained(MODEL_NAME)
@@ -27,144 +44,146 @@ def load_model():
 processor, model = load_model()
 
 def run_image_analysis(image):
-    # ACCURACY OPTIMIZATION 1: Resize to Native Model Resolution
-    # The model was trained on 1024x1024. Feeding it other sizes reduces accuracy.
-    # LANCZOS filter ensures high-quality downscaling.
+    # ACCURACY FIX: Resize to 1024x1024 (Model Native Resolution)
+    # This prevents the AI from getting confused by different scales.
     input_image = image.resize((1024, 1024), Image.Resampling.LANCZOS)
     
     inputs = processor(images=input_image, return_tensors="pt")
 
     with torch.no_grad():
         outputs = model(**inputs)
-        
-        # Upsample logits to match 1024x1024
         upsampled_logits = nn.functional.interpolate(
             outputs.logits, size=(1024, 1024), mode='bilinear'
         )
         mask = upsampled_logits.argmax(dim=1).squeeze().numpy()
+    
+    # RAM Cleanup
+    del inputs, outputs, upsampled_logits
+    gc.collect()
         
     return mask
 
-def clean_mask_noise(mask):
-    """
-    ACCURACY OPTIMIZATION 2: Post-Processing
-    Uses Scipy to remove 'salt-and-pepper' noise from the mask.
-    This eliminates random, incorrect single-pixel predictions.
-    """
-    # Size 5 filter smooths edges and removes isolated noise pixels
-    return median_filter(mask, size=5)
+def clean_mask(mask):
+    # ACCURACY BOOSTER: Denoising
+    # Removes random "salt and pepper" noise dots using PIL (Lightweight)
+    mask_img = Image.fromarray(mask.astype('uint8'))
+    clean_img = mask_img.filter(ImageFilter.MedianFilter(size=5))
+    return np.array(clean_img)
 
 def get_prediction_image(mask):
     colors = np.zeros((mask.shape[0], mask.shape[1], 3), dtype=np.uint8)
-    # Healthy (Green)
-    colors[np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33])] = [34, 139, 34]
+    # Healthy (Teal)
+    colors[np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33])] = [26, 188, 156]
     # Bleached (White)
-    colors[mask == 12] = [255, 255, 255]
+    colors[mask == 12] = [236, 240, 241]
     # Algae (Red)
-    colors[np.isin(mask, [13,14,15,16])] = [220, 20, 60]
+    colors[np.isin(mask, [13,14,15,16])] = [231, 76, 60]
     # Rubble (Grey)
-    colors[np.isin(mask, [17,18])] = [128, 128, 128]
+    colors[np.isin(mask, [17,18])] = [149, 165, 166]
     return Image.fromarray(colors)
 
-def generate_reef_report(mask, filename):
+def generate_report(mask, filename):
     total_px = int(mask.size)
     if total_px == 0: total_px = 1
     
     healthy_px = int(np.isin(mask, [0,1,2,3,4,5,6,7,8,9,10,11,23,33]).sum())
     bleached_px = int((mask == 12).sum())
     algae_px = int(np.isin(mask, [13,14,15,16]).sum())
-    damage_px = int(np.isin(mask, [17,18]).sum())
     
     total_coral = healthy_px + bleached_px
-    
     lcc_val = (total_coral / total_px) * 100
     sev_val = (bleached_px / total_coral * 100) if total_coral > 0 else 0
     algae_cov = (algae_px / total_px) * 100
     
+    status = "Healthy"
+    if sev_val > 10: status = "Bleached"
+    if sev_val > 50: status = "Critical"
+    
     return {
-        "Image_ID": str(filename),
-        "Health_Status": "Bleached" if sev_val > 10 else "Healthy",
-        "Bleaching_Severity_Score": round(float(sev_val), 2),
-        "Severity_Label": "Severe" if sev_val > 50 else "Moderate" if sev_val > 15 else "Low",
-        "Live_Coral_Cover_Pct": round(float(lcc_val), 1),
-        "Algae_Cover_Pct": round(float(algae_cov), 1),
-        "Structural_Damage": "High" if damage_px > (total_px * 0.05) else "Low"
+        "File": str(filename),
+        "Status": status,
+        "Bleaching": round(float(sev_val), 2),
+        "Live_Cover": round(float(lcc_val), 1),
+        "Algae": round(float(algae_cov), 1),
     }
 
 def create_pdf(report):
     pdf = FPDF()
     pdf.add_page()
     pdf.set_font("Arial", 'B', 16)
-    pdf.cell(200, 10, txt="Coral Reef Health Analysis Report", ln=True, align='C')
+    pdf.cell(0, 10, "Coral Health Analysis Report", ln=True, align='C')
     pdf.ln(10)
-    pdf.set_font("Arial", size=12)
-    pdf.cell(200, 10, txt=f"Image Filename: {report['Image_ID']}", ln=True)
-    pdf.ln(5)
-    
-    status_color = "RED" if report['Health_Status'] == "Bleached" else "GREEN"
-    pdf.set_font("Arial", 'B', 14)
-    pdf.cell(200, 10, txt=f"Overall Status: {report['Health_Status']}", ln=True)
     
     pdf.set_font("Arial", size=12)
+    pdf.cell(0, 10, f"File Name: {report['File']}", ln=True)
+    pdf.cell(0, 10, f"Health Status: {report['Status']}", ln=True)
     pdf.ln(5)
-    pdf.cell(200, 10, txt=f"Bleaching Severity: {report['Severity_Label']} ({report['Bleaching_Severity_Score']}%)", ln=True)
-    pdf.cell(200, 10, txt=f"Live Coral Cover: {report['Live_Coral_Cover_Pct']}%", ln=True)
-    pdf.cell(200, 10, txt=f"Algae Cover: {report['Algae_Cover_Pct']}%", ln=True)
-    pdf.cell(200, 10, txt=f"Structural Damage: {report['Structural_Damage']}", ln=True)
+    
+    pdf.cell(0, 10, f"Bleaching Severity: {report['Bleaching']}%", ln=True)
+    pdf.cell(0, 10, f"Live Coral Cover: {report['Live_Cover']}%", ln=True)
+    pdf.cell(0, 10, f"Algae Coverage: {report['Algae']}%", ln=True)
     
     pdf.ln(20)
     pdf.set_font("Arial", 'I', 10)
-    pdf.cell(200, 10, txt="Generated by AI Coral Inspector", ln=True, align='C')
+    pdf.cell(0, 10, "Generated by ReefGuard AI", align='C')
     return pdf.output(dest='S').encode('latin-1')
 
-# --- 3. FRONTEND UI ---
-st.title("🪸 Coral Reef Bleaching Detector")
-st.markdown("### AI-Powered Analysis for Marine Conservation")
+# --- 3. FRONTEND LAYOUT ---
+st.title("🪸 ReefGuard AI")
+st.markdown("### Intelligent Coral Health Monitoring System")
 
-uploaded_file = st.file_uploader("Choose a Coral Image...", type=["jpg", "jpeg", "png"])
+# Sidebar
+with st.sidebar:
+    st.header("Analysis Console")
+    uploaded_file = st.file_uploader("Upload Image", type=["jpg", "jpeg", "png"])
+    st.info("Upload a clear underwater image.")
 
 if uploaded_file is not None:
-    # 1. Open Image & Immediate Resize (Memory Safety)
-    original_image = Image.open(uploaded_file)
-    if original_image.width > 1024 or original_image.height > 1024:
-        original_image.thumbnail((1024, 1024))
-
-    with st.spinner('Running High-Precision Analysis...'):
-        # 2. Run AI
-        raw_mask = run_image_analysis(original_image)
+    # 1. Open and Safety Resize
+    image = Image.open(uploaded_file)
+    if image.width > 1024:
+        image.thumbnail((1024, 1024))
         
-        # 3. Clean Noise (This improves visual accuracy significantly)
-        clean_mask = clean_mask_noise(raw_mask)
+    with st.spinner('Running AI Diagnostics...'):
+        # 2. Run Analysis & Cleanup
+        raw_mask = run_image_analysis(image)
+        clean_mask = clean_mask(raw_mask) # ACCURACY BOOST APPLIED HERE
+        report = generate_report(clean_mask, uploaded_file.name)
+        prediction = get_prediction_image(clean_mask)
+        gc.collect()
+
+    # 3. Dashboard Metrics
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Status", report["Status"])
+    m2.metric("Bleaching", f"{report['Bleaching']}%")
+    m3.metric("Live Cover", f"{report['Live_Cover']}%")
+    m4.metric("Algae", f"{report['Algae']}%")
+    
+    st.divider()
+
+    # 4. Before/After Visuals
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Original Feed")
+        st.image(image, use_container_width=True)
+    with c2:
+        st.subheader("AI Segmentation")
+        st.image(prediction, use_container_width=True)
         
-        # 4. Generate Report
-        report = generate_reef_report(clean_mask, uploaded_file.name)
-        prediction_img = get_prediction_image(clean_mask)
+    st.caption("Legend: 🟢 Healthy | ⚪ Bleached | 🔴 Algae | ⚫ Rubble")
 
-    # --- DISPLAY RESULTS ---
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Health Status", report["Health_Status"])
-    col2.metric("Bleaching Severity", f"{report['Bleaching_Severity_Score']}%", report["Severity_Label"])
-    col3.metric("Live Coral Cover", f"{report['Live_Coral_Cover_Pct']}%")
-
-    st.subheader("Visual Analysis")
-    img_col1, img_col2 = st.columns(2)
-    with img_col1:
-        st.image(original_image, caption="Original Image", use_container_width=True)
-    with img_col2:
-        st.image(prediction_img, caption="AI Segmentation Mask (Denoised)", use_container_width=True)
-    
-    st.caption("🟢 Green: Healthy | ⚪ White: Bleached | 🔴 Red: Algae | ⚫ Grey: Rubble")
-
-    st.subheader("Detailed Report")
-    safe_report = {k: str(v) for k, v in report.items()}
-    st.table([safe_report])
-    
-    pdf_bytes = create_pdf(report)
+    # 5. PDF Export
+    st.divider()
+    pdf_data = create_pdf(report)
     st.download_button(
-        label="📄 Download PDF Report",
-        data=pdf_bytes,
-        file_name=f"reef_report_{uploaded_file.name}.pdf",
-        mime="application/pdf"
+        label="📄 Download Official Report (PDF)",
+        data=pdf_data,
+        file_name=f"ReefGuard_Report.pdf",
+        mime="application/pdf",
+        type="primary"
     )
 
-    st.success(f"Analysis complete for {uploaded_file.name}")
+else:
+    st.markdown("#### Waiting for input...")
+    st.image("https://upload.wikimedia.org/wikipedia/commons/c/cb/Acropora_coral_reef.jpg", 
+             caption="Example Healthy Reef", width=400)
